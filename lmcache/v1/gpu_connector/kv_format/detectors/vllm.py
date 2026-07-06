@@ -69,4 +69,11 @@ class VLLM_Detector(EngineDetector):
                 return lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS, kv_caches
         if list_depth == 1 and tensor_ndim == 3:  # MLA
             return lmc_ops.EngineKVFormat.NL_X_NB_BS_HS, kv_caches
+        if (
+            list_depth == 2
+            and tensor_ndim == 4
+            and isinstance(kv_caches[0], (list, tuple))
+            and len(kv_caches[0]) == 2
+        ):
+            return lmc_ops.EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS, kv_caches
         return None, kv_caches

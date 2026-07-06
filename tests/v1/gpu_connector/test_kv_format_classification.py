@@ -2,11 +2,12 @@
 """Golden tests for the ``EngineKVFormat`` classification predicates.
 
 The structural shape (``is_cross_layer`` / ``is_kv_list`` / ``is_layer_list``)
-and the ``is_mla`` modifier are defined once in ``csrc/engine_kv_format.h`` and
-read via ``lmc_ops``, shared with the device kernels. This file pins each
-format's classification and enforces that the three structural flags partition
-every format (exactly one is true), so a new format or an edit cannot silently
-break the contract the per-layer detection relies on.
+and the ``is_mla`` / ``is_kv_second_tuple`` modifiers are defined once in
+``csrc/engine_kv_format.h`` and read via ``lmc_ops``, shared with the device
+kernels. This file pins each format's classification and enforces that the
+three structural flags partition every format (exactly one is true), so a new
+format or an edit cannot silently break the contract the per-layer detection
+relies on.
 """
 
 # First Party
@@ -14,19 +15,21 @@ import lmcache.c_ops as lmc_ops
 
 F = lmc_ops.EngineKVFormat
 
-# (is_cross_layer, is_kv_list, is_layer_list, is_mla) per format.
+# (is_cross_layer, is_kv_list, is_layer_list, is_mla, is_kv_second_tuple) per
+# format.
 EXPECTED = {
-    F.NB_NL_TWO_BS_NH_HS: (True, False, False, False),
-    F.NB_NL_TWO_NH_BS_HS: (True, False, False, False),
-    F.TWO_X_NL_X_NBBS_NH_HS: (False, True, False, False),
-    F.TWO_X_NL_X_NB_BS_NH_HS: (False, True, False, False),
-    F.NL_X_TWO_NB_BS_NH_HS: (False, False, True, False),
-    F.NL_X_NB_TWO_BS_NH_HS: (False, False, True, False),
-    F.NL_X_TWO_NB_NH_BS_HS: (False, False, True, False),
-    F.NL_X_NB_TWO_NH_BS_HS: (False, False, True, False),
-    F.NL_X_NB_NH_BS_TWO_HS: (False, False, True, False),
-    F.NL_X_NB_BS_HS: (False, False, True, True),
-    F.NL_X_NBBS_ONE_HS: (False, False, True, True),
+    F.NB_NL_TWO_BS_NH_HS: (True, False, False, False, False),
+    F.NB_NL_TWO_NH_BS_HS: (True, False, False, False, False),
+    F.TWO_X_NL_X_NBBS_NH_HS: (False, True, False, False, False),
+    F.TWO_X_NL_X_NB_BS_NH_HS: (False, True, False, False, False),
+    F.NL_X_TWO_NB_BS_NH_HS: (False, False, True, False, False),
+    F.NL_X_NB_TWO_BS_NH_HS: (False, False, True, False, False),
+    F.NL_X_TWO_NB_NH_BS_HS: (False, False, True, False, False),
+    F.NL_X_NB_TWO_NH_BS_HS: (False, False, True, False, False),
+    F.NL_X_NB_NH_BS_TWO_HS: (False, False, True, False, False),
+    F.NL_X_NB_BS_HS: (False, False, True, True, False),
+    F.NL_X_NBBS_ONE_HS: (False, False, True, True, False),
+    F.NL_X_TWO_X_NB_BS_NH_HS: (False, False, True, False, True),
 }
 
 
@@ -41,6 +44,7 @@ def test_classification_matches_golden():
             lmc_ops.is_kv_list(fmt),
             lmc_ops.is_layer_list(fmt),
             lmc_ops.is_mla(fmt),
+            lmc_ops.is_kv_second_tuple(fmt),
         )
         assert got == expected, f"{fmt}: got {got}, expected {expected}"
 

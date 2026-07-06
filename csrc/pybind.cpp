@@ -33,6 +33,7 @@ PYBIND11_MODULE(c_ops, m) {
       .value("NB_NL_TWO_NH_BS_HS", EngineKVFormat::NB_NL_TWO_NH_BS_HS)
       .value("TWO_X_NL_X_NB_BS_NH_HS", EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS)
       .value("NL_X_NB_NH_BS_TWO_HS", EngineKVFormat::NL_X_NB_NH_BS_TWO_HS)
+      .value("NL_X_TWO_X_NB_BS_NH_HS", EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS)
       .export_values();
   // Format classification, shared with the device kernels (engine_kv_format.h).
   m.def(
@@ -46,6 +47,9 @@ PYBIND11_MODULE(c_ops, m) {
       py::arg("engine_kv_format"));
   m.def(
       "is_mla", [](EngineKVFormat f) { return is_mla(f); },
+      py::arg("engine_kv_format"));
+  m.def(
+      "is_kv_second_tuple", [](EngineKVFormat f) { return is_kv_second_tuple(f); },
       py::arg("engine_kv_format"));
   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer,
         py::arg("key_value"), py::arg("key_value_ptrs"),

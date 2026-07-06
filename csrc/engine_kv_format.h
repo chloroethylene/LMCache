@@ -101,6 +101,14 @@ enum class EngineKVFormat : int {
   Currently only reached via the host gather/scatter path, not the device
   transfer kernels.
   */
+
+  NL_X_TWO_X_NB_BS_NH_HS = 11,
+  /*
+  used by:
+  - vLLM per-layer (K, V) tuples
+  physical shape per layer: [num_blocks, block_size, num_heads, head_size]
+  One list entry per layer; each entry is a (K, V) pair of paged tensors.
+  */
 };
 
 // __host__ __device__ under CUDA/HIP so the kernels can call these; the guard
@@ -133,11 +141,17 @@ LMC_KV_FORMAT_HD constexpr bool is_layer_list(EngineKVFormat f) {
          f == EngineKVFormat::NL_X_NBBS_ONE_HS ||
          f == EngineKVFormat::NL_X_TWO_NB_NH_BS_HS ||
          f == EngineKVFormat::NL_X_NB_TWO_NH_BS_HS ||
-         f == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS;
+         f == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS ||
+         f == EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS;
 }
 
 // Multi-head Latent Attention: a single latent KV head (no separate K/V split).
 LMC_KV_FORMAT_HD constexpr bool is_mla(EngineKVFormat f) {
   return f == EngineKVFormat::NL_X_NB_BS_HS ||   // vLLM MLA
          f == EngineKVFormat::NL_X_NBBS_ONE_HS;  // SGLang MLA
+}
+
+// One list entry per layer, each entry is a tuple of paged tensors.
+LMC_KV_FORMAT_HD constexpr bool is_kv_second_tuple(EngineKVFormat f) {
+  return f == EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS;
 }
