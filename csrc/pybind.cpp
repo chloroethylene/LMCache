@@ -49,7 +49,8 @@ PYBIND11_MODULE(c_ops, m) {
       "is_mla", [](EngineKVFormat f) { return is_mla(f); },
       py::arg("engine_kv_format"));
   m.def(
-      "is_kv_second_tuple", [](EngineKVFormat f) { return is_kv_second_tuple(f); },
+      "is_kv_second_tuple",
+      [](EngineKVFormat f) { return is_kv_second_tuple(f); },
       py::arg("engine_kv_format"));
   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer,
         py::arg("key_value"), py::arg("key_value_ptrs"),

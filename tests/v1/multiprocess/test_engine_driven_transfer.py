@@ -787,9 +787,9 @@ def test_compute_kv_layout_per_layer_kv_tuples() -> None:
 
 def test_per_layer_kv_tuple_format_accessors_and_grouping() -> None:
     # First Party
+    from lmcache.utils import EngineType
     from lmcache.v1.gpu_connector import utils as U
     from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-    from lmcache.utils import EngineType
     import lmcache.c_ops as lmc_ops
 
     F = lmc_ops.EngineKVFormat
