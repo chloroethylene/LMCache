@@ -22,8 +22,8 @@ import (
 
 // ValidateSpec validates the CacheBlendEngineSpec and returns any validation
 // errors. It mirrors LMCacheEngine.ValidateSpec and additionally enforces the
-// CacheBlend invariants: chunkSize == 256, recompRatio in (0, 1], and
-// checkLayer >= 0.
+// CacheBlend invariants: chunkSize == 256, recompRatio in (0, 1], checkLayer
+// >= 0, and partialBucket >= 1.
 func (e *CacheBlendEngine) ValidateSpec() field.ErrorList {
 	var errs field.ErrorList
 	spec := &e.Spec
@@ -67,6 +67,11 @@ func (e *CacheBlendEngine) ValidateSpec() field.ErrorList {
 				errs = append(errs, field.Invalid(blendPath.Child("recompRatio"), rr, "must be in (0.0, 1.0]"))
 			}
 		}
+
+		if spec.Blend.PartialBucket != nil && *spec.Blend.PartialBucket < 1 {
+			errs = append(errs, field.Invalid(blendPath.Child("partialBucket"),
+				*spec.Blend.PartialBucket, "must be >= 1"))
+		}
 	}
 
 	// Injection validation. injection.payloadImage.repository is functionally
@@ -86,6 +91,7 @@ func (e *CacheBlendEngine) ValidateSpec() field.ErrorList {
 	}
 
 	errs = append(errs, validateL2BackendSpec(spec.L2Backend)...)
+	errs = append(errs, validateCoordinatorConnectionSpec(spec.Coordinator)...)
 
 	return errs
 }

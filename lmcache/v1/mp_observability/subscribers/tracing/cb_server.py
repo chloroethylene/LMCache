@@ -7,7 +7,7 @@ Opens at ``CB_REQUEST_START``; closes at ``CB_REQUEST_END``, deferred until
 any in-flight GPU store/retrieve callbacks complete **and** until
 ``CB_STORE_FINAL_SUBMITTED`` has been received (if a retrieve was submitted).
 
-On the HIT path the lifecycle is:
+On the V2 HIT path the lifecycle is:
 
   CB_RETRIEVE_SUBMITTED → [retrieve GPU op] → CB_RETRIEVE_END
       → [inference, ~hundreds of ms, pending_gpu_ops==0 here]
@@ -23,10 +23,19 @@ conditions hold simultaneously:
 * ``_pending_gpu_ops[sid] == 0``
 * ``sid not in _waiting_for_store_final``
 
-Accepts an optional :class:`~lmcache.v1.mp_observability.subscribers.tracing\
-.span_registry.SpanRegistry` so the ``"cb.request"`` span is automatically
-nested under the MP server ``"request"`` root when both subscribers share the
-same registry.
+V3 ends the request at ``CB_RETRIEVE_END``, so its ``CB_RETRIEVE_SUBMITTED``
+carries ``expects_store_final=False``: the bridge stays empty and the root close
+is gated on ``_pending_gpu_ops`` alone. The sentinel still matters there — at
+TP>1, a worker whose retrieve is a no-op publishes ``CB_REQUEST_END`` on the CPU
+while another worker's scatter is still on the stream. A V3 request whose lookup
+found nothing to retrieve (miss, or prefix-only) never reaches a retrieve, so
+``cb_unified_lookup`` publishes ``CB_REQUEST_END`` itself when it finalizes.
+
+``cb.request`` is the trace root: blend_v3 owns the CB lookup end-to-end (prefix
++ non-prefix legs, direct against the storage manager), so a CB request never
+opens an MP ``"request"`` span to nest under. The optional
+:class:`~lmcache.v1.mp_observability.subscribers.tracing.span_registry\
+.SpanRegistry` is used to nest the CB child spans under ``cb.request``.
 """
 
 # Future
@@ -74,6 +83,8 @@ class BlendTracingSubscriber(EventSubscriber):
         EventType.CB_STORE_FINAL_START: "cb.store_final",
         # V3 lookup sub-spans (nest under cb.lookup, see _SPAN_PARENTS).
         EventType.CB_FINGERPRINT_MATCH_START: "cb.fingerprint_match",
+        EventType.CB_PREFIX_LOOKUP_START: "cb.prefix_lookup",
+        EventType.CB_COORDINATOR_MATCH_START: "cb.coordinator_match",
         EventType.CB_SPARSE_PREFETCH_START: "cb.sparse_prefetch",
         # V3 retrieve sub-span (nests under cb.retrieve).
         EventType.CB_SCATTER_START: "cb.scatter",
@@ -83,6 +94,8 @@ class BlendTracingSubscriber(EventSubscriber):
     # cb.request root (the default for the top-level lookup/retrieve/store spans).
     _SPAN_PARENTS: dict[str, str] = {
         "cb.fingerprint_match": "cb.lookup",
+        "cb.prefix_lookup": "cb.lookup",
+        "cb.coordinator_match": "cb.lookup",
         "cb.sparse_prefetch": "cb.lookup",
         "cb.scatter": "cb.retrieve",
     }
@@ -93,6 +106,8 @@ class BlendTracingSubscriber(EventSubscriber):
         EventType.CB_RETRIEVE_END: EventType.CB_RETRIEVE_START,
         EventType.CB_STORE_FINAL_END: EventType.CB_STORE_FINAL_START,
         EventType.CB_FINGERPRINT_MATCH_END: EventType.CB_FINGERPRINT_MATCH_START,
+        EventType.CB_PREFIX_LOOKUP_END: EventType.CB_PREFIX_LOOKUP_START,
+        EventType.CB_COORDINATOR_MATCH_END: EventType.CB_COORDINATOR_MATCH_START,
         EventType.CB_SPARSE_PREFETCH_END: EventType.CB_SPARSE_PREFETCH_START,
         EventType.CB_SCATTER_END: EventType.CB_SCATTER_START,
     }
@@ -145,6 +160,10 @@ class BlendTracingSubscriber(EventSubscriber):
             # V3 lookup sub-spans (nested under cb.lookup)
             EventType.CB_FINGERPRINT_MATCH_START: self._on_start,
             EventType.CB_FINGERPRINT_MATCH_END: self._on_end,
+            EventType.CB_PREFIX_LOOKUP_START: self._on_start,
+            EventType.CB_PREFIX_LOOKUP_END: self._on_end,
+            EventType.CB_COORDINATOR_MATCH_START: self._on_start,
+            EventType.CB_COORDINATOR_MATCH_END: self._on_end,
             EventType.CB_SPARSE_PREFETCH_START: self._on_start,
             EventType.CB_SPARSE_PREFETCH_END: self._on_end,
             # V3 retrieve sub-span (nested under cb.retrieve, GPU-timed)
@@ -153,6 +172,7 @@ class BlendTracingSubscriber(EventSubscriber):
             # Point events
             EventType.CB_FINGERPRINTS_REGISTERED: self._on_point,
             EventType.CB_CHUNKS_EVICTED: self._on_point,
+            EventType.CB_RETRIEVE_NOOP: self._on_point,
         }
 
     # ------------------------------------------------------------------
@@ -184,7 +204,10 @@ class BlendTracingSubscriber(EventSubscriber):
     # ------------------------------------------------------------------
 
     def _on_request_start(self, event: Event) -> None:
-        """Create the ``"cb.request"`` root span, nested under MP's root if present.
+        """Create the ``"cb.request"`` root span.
+
+        blend_v3 owns the CB lookup end-to-end, so a CB request never opens an MP
+        ``"request"`` span — ``cb.request`` is the trace root.
 
         Args:
             event: ``CB_REQUEST_START`` event with ``session_id`` set.
@@ -195,11 +218,8 @@ class BlendTracingSubscriber(EventSubscriber):
         if self._registry.get_context(sid, "cb.request") is not None:
             logger.warning("CB_REQUEST_START fired twice for session=%s; ignoring", sid)
             return
-        # Nest under the MP server's "request" span when running alongside it.
-        mp_root_ctx = self._registry.get_context(sid, "request")
         root_span = _tracer.start_span(
             "cb.request",
-            context=mp_root_ctx,
             start_time=int(event.timestamp * 1e9),
         )
         root_span.set_attribute("session_id", sid)
@@ -211,8 +231,10 @@ class BlendTracingSubscriber(EventSubscriber):
         """Increment the in-flight GPU-ops counter and update store-final tracking.
 
         ``CB_RETRIEVE_SUBMITTED`` marks the session as waiting for a store_final,
-        bridging the inference gap where ``_pending_gpu_ops`` is transiently 0.
-        ``CB_STORE_FINAL_SUBMITTED`` clears that marker (store_final has arrived).
+        bridging the inference gap where ``_pending_gpu_ops`` is transiently 0 —
+        unless it carries ``expects_store_final=False`` (V3, where marking it
+        would hold the root span open forever). ``CB_STORE_FINAL_SUBMITTED``
+        clears that marker (store_final has arrived).
 
         Args:
             event: One of ``CB_STORE_PRE_COMPUTED_SUBMITTED``,
@@ -223,7 +245,8 @@ class BlendTracingSubscriber(EventSubscriber):
         sid = event.session_id
         self._pending_gpu_ops[sid] = self._pending_gpu_ops.get(sid, 0) + 1
         if event.event_type == EventType.CB_RETRIEVE_SUBMITTED:
-            self._waiting_for_store_final.add(sid)
+            if event.metadata.get("expects_store_final", True):
+                self._waiting_for_store_final.add(sid)
         elif event.event_type == EventType.CB_STORE_FINAL_SUBMITTED:
             self._waiting_for_store_final.discard(sid)
 
@@ -328,21 +351,31 @@ class BlendTracingSubscriber(EventSubscriber):
                 hit_tokens = int(event.metadata.get("hit_tokens", 0))
                 requested_tokens = int(event.metadata.get("requested_tokens", 0))
                 prefix_hit_tokens = int(event.metadata.get("prefix_hit_tokens", 0))
+                seg_prefix_hit_tokens = int(
+                    event.metadata.get("segmented_prefix_hit_tokens", 0)
+                )
                 non_prefix_hit_tokens = int(
                     event.metadata.get("non_prefix_hit_tokens", 0)
                 )
                 denom = requested_tokens or 1  # avoid /0; rates are 0 when requested=0
                 root_span.set_attribute("hit_tokens", hit_tokens)
                 root_span.set_attribute("requested_tokens", requested_tokens)
-                # hit_rate numerator = prefix + non-prefix reuse (hit_tokens).
+                # hit_rate numerator = prefix + segmented-prefix tail + non-prefix
+                # reuse (hit_tokens).
                 root_span.set_attribute("hit_rate", hit_tokens / denom)
                 root_span.set_attribute(
                     "prefix_hits", int(event.metadata.get("prefix_hits", 0))
                 )
                 root_span.set_attribute("prefix_hit_tokens", prefix_hit_tokens)
+                root_span.set_attribute(
+                    "segmented_prefix_hit_tokens", seg_prefix_hit_tokens
+                )
                 root_span.set_attribute("non_prefix_hit_tokens", non_prefix_hit_tokens)
                 # Per-component hit rates (sum to hit_rate).
                 root_span.set_attribute("prefix_hit_rate", prefix_hit_tokens / denom)
+                root_span.set_attribute(
+                    "segmented_prefix_hit_rate", seg_prefix_hit_tokens / denom
+                )
                 root_span.set_attribute(
                     "non_prefix_hit_rate", non_prefix_hit_tokens / denom
                 )
@@ -368,7 +401,11 @@ class BlendTracingSubscriber(EventSubscriber):
         """Emit an instant span for point events (no paired END).
 
         Args:
-            event: ``CB_FINGERPRINTS_REGISTERED`` or ``CB_CHUNKS_EVICTED``.
+            event: ``CB_FINGERPRINTS_REGISTERED``, ``CB_CHUNKS_EVICTED``, or
+                ``CB_RETRIEVE_NOOP``. The first two run outside the originating
+                request's span and so routinely land as trace roots of their
+                own; only ``CB_RETRIEVE_NOOP`` reliably nests under
+                ``cb.request``.
         """
         if not _HAS_OTEL:
             return

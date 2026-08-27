@@ -11,7 +11,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import EvictionConfig
 from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (
@@ -26,6 +26,8 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+
+_EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 
 def _has_ext() -> bool:
@@ -202,6 +204,15 @@ def test_raw_block_l2_adapter_config_validates_iouring_queue_depth():
         RawBlockL2AdapterConfig.from_dict(_config_dict(iouring_queue_depth=0))
 
 
+@pytest.mark.parametrize("block_align", [0, -1, 3, 4095])
+def test_raw_block_l2_adapter_config_rejects_non_power_of_2_block_align(
+    block_align: int,
+) -> None:
+    """from_dict rejects invalid block_align values."""
+    with pytest.raises(ValueError, match="block_align"):
+        RawBlockL2AdapterConfig.from_dict(_config_dict(block_align=block_align))
+
+
 def _run_store(adapter: RawBlockL2Adapter, keys, objects) -> bool:
     task_id = adapter.submit_store_task(keys, objects)
     assert _wait_event_fd(adapter.get_store_event_fd())
@@ -211,7 +222,7 @@ def _run_store(adapter: RawBlockL2Adapter, keys, objects) -> bool:
 
 
 def _run_lookup(adapter: RawBlockL2Adapter, keys):
-    task_id = adapter.submit_lookup_and_lock_task(keys)
+    task_id = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
     assert _wait_event_fd(adapter.get_lookup_and_lock_event_fd())
     return task_id, adapter.query_lookup_and_lock_result(task_id)
 
@@ -546,6 +557,7 @@ def test_raw_block_l2_adapter_recovered_keys_seed_l2_eviction_state():
         adapter2 = RawBlockL2Adapter(config)
         try:
             state = L2AdapterEvictionState(
+                0,
                 adapter2,
                 EvictionConfig(eviction_policy="LRU", eviction_ratio=1.0),
             )
@@ -606,7 +618,9 @@ def test_raw_block_l2_adapter_error_bitmaps_keep_submitted_size():
             with patch.object(
                 adapter, "_run_lookup_task", side_effect=RuntimeError("lookup failed")
             ):
-                lookup_task_id = adapter.submit_lookup_and_lock_task(keys)
+                lookup_task_id = adapter.submit_lookup_and_lock_task(
+                    keys, {0: _EMPTY_LAYOUT}
+                )
                 assert _wait_event_fd(adapter.get_lookup_and_lock_event_fd())
                 lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_task_id)
             assert lookup_bitmap is not None

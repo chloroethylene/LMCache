@@ -41,6 +41,37 @@ func (e *LMCacheEngine) ValidateSpec() field.ErrorList {
 	}
 
 	errs = append(errs, validateL2BackendSpec(spec.L2Backend)...)
+	errs = append(errs, validateCoordinatorConnectionSpec(spec.Coordinator)...)
+
+	return errs
+}
+
+// validateCoordinatorConnectionSpec validates the shared coordinator connection
+// configuration used by both LMCacheEngine and CacheBlendEngine. A nil spec is
+// valid (registration is disabled). Exactly one of ref or url must be set, and
+// the intervals must be positive. Errors are rooted at spec.coordinator.
+func validateCoordinatorConnectionSpec(conn *CoordinatorConnectionSpec) field.ErrorList {
+	var errs field.ErrorList
+	if conn == nil {
+		return errs
+	}
+	connPath := field.NewPath("spec", "coordinator")
+
+	refSet := conn.Ref != nil && conn.Ref.Name != ""
+	urlSet := conn.URL != nil && *conn.URL != ""
+	switch {
+	case refSet && urlSet:
+		errs = append(errs, field.Invalid(connPath, "", "exactly one of ref or url must be set, got both"))
+	case !refSet && !urlSet:
+		errs = append(errs, field.Required(connPath, "exactly one of ref or url must be set"))
+	}
+
+	if conn.HeartbeatInterval != nil && *conn.HeartbeatInterval <= 0 {
+		errs = append(errs, field.Invalid(connPath.Child("heartbeatInterval"), *conn.HeartbeatInterval, "must be greater than 0"))
+	}
+	if conn.L2EventFlushInterval != nil && *conn.L2EventFlushInterval <= 0 {
+		errs = append(errs, field.Invalid(connPath.Child("l2EventFlushInterval"), *conn.L2EventFlushInterval, "must be greater than 0"))
+	}
 
 	return errs
 }
@@ -120,6 +151,24 @@ func validateL2BackendSpec(b *L2BackendSpec) field.ErrorList {
 		rawPath := l2Path.Child("raw")
 		if b.Raw.Type == "" {
 			errs = append(errs, field.Required(rawPath.Child("type"), "must be a non-empty string"))
+		}
+	}
+
+	if b.Serde != nil {
+		serdePath := l2Path.Child("serde")
+		if b.Serde.AESGCM == nil {
+			errs = append(errs, field.Required(serdePath, "exactly one serde type must be set"))
+		} else if b.Serde.AESGCM.MasterKeySecretRef.Name == "" {
+			errs = append(errs, field.Required(serdePath.Child("aesgcm", "masterKeySecretRef", "name"), "must be non-empty"))
+		}
+		// A raw adapter spec may already carry a hand-written "serde"
+		// config; combining it with the serde field would silently
+		// overwrite one of the two.
+		if b.Raw != nil {
+			if _, ok := b.Raw.Config["serde"]; ok {
+				errs = append(errs, field.Invalid(serdePath, "",
+					"cannot be combined with a raw adapter that sets a 'serde' config key"))
+			}
 		}
 	}
 

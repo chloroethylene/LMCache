@@ -21,9 +21,12 @@ from nixl._api import nixl_agent as NixlAgent
 from nixl._api import nixl_agent_config as NixlAgentConfig
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import PagedTensorMemoryAllocator
+from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
+    PagedTensorMemoryAllocator,
+)
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.nixl_storage_backend import (
@@ -263,7 +266,7 @@ def run(config: LMCacheEngineConfig, shape, dtype):
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.cuda
 @pytest.mark.skipif(
     not _can_register_file_with_nixl_backend("GDS_MT"),
     reason=_GDS_SKIP_REASON.format(backend="GDS_MT"),
@@ -275,7 +278,7 @@ def test_nixl_gds_mt_cuda_backend(nixl_tmp_path):
     dtype = torch.bfloat16
     shape = torch.Size([4, 2, 256, 8, 128])
 
-    config.nixl_buffer_device = "cuda"
+    config.nixl_buffer_device = torch_device_type
     # data/nixl.yaml is CPU-mode (no nixl_buffer_size); CUDA mode sizes the
     # NIXL buffer via nixl_buffer_size, so restore it when flipping the device.
     config.nixl_buffer_size = 1024**3
@@ -307,7 +310,7 @@ def test_nixl_gds_mt_cpu_backend(nixl_tmp_path):
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.cuda
 @pytest.mark.skipif(
     not _can_register_file_with_nixl_backend("GDS"),
     reason=_GDS_SKIP_REASON.format(backend="GDS"),
@@ -319,7 +322,7 @@ def test_nixl_gds_cuda_backend(nixl_tmp_path):
     dtype = torch.bfloat16
     shape = torch.Size([4, 2, 256, 8, 128])
 
-    config.nixl_buffer_device = "cuda"
+    config.nixl_buffer_device = torch_device_type
     # data/nixl.yaml is CPU-mode (no nixl_buffer_size); CUDA mode sizes the
     # NIXL buffer via nixl_buffer_size, so restore it when flipping the device.
     config.nixl_buffer_size = 1024**3
@@ -393,7 +396,62 @@ def test_nixl_endpoint_list_malformed_url_raises():
         NixlStorageConfig.from_cache_engine_config(config, metadata)
 
 
+def _presence_cache_metadata() -> LMCacheMetadata:
+    return LMCacheMetadata(
+        model_name="Llama-3.1-70B-Instruct",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(4, 2, 256, 8, 128),
+    )
+
+
 @pytest.mark.no_shared_allocator
+def test_nixl_presence_cache_only_defaults_false():
+    """presence_cache_only defaults to False when the config key is absent."""
+    BASE_DIR = Path(__file__).parent
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
+
+    nixl_config = NixlStorageConfig.from_cache_engine_config(
+        config, _presence_cache_metadata()
+    )
+
+    assert nixl_config.presence_cache_only is False
+
+
+@pytest.mark.no_shared_allocator
+def test_nixl_presence_cache_only_parsed():
+    """nixl_presence_cache_only=True is parsed onto NixlStorageConfig."""
+    BASE_DIR = Path(__file__).parent
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
+    config.extra_config["nixl_presence_cache"] = True
+    config.extra_config["nixl_presence_cache_only"] = True
+
+    nixl_config = NixlStorageConfig.from_cache_engine_config(
+        config, _presence_cache_metadata()
+    )
+
+    assert nixl_config.presence_cache_only is True
+
+
+@pytest.mark.no_shared_allocator
+def test_nixl_presence_cache_only_requires_presence_cache():
+    """nixl_presence_cache_only=True without nixl_presence_cache raises ValueError."""
+    BASE_DIR = Path(__file__).parent
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
+    config.extra_config["nixl_presence_cache_only"] = True
+
+    with pytest.raises(ValueError, match="nixl_presence_cache must be true"):
+        config.validate()
+
+
+@pytest.mark.no_shared_allocator
+@pytest.mark.skipif(
+    not _can_register_file_with_nixl_backend("POSIX"),
+    reason="NIXL POSIX backend cannot register file handles in this environment",
+)
 def test_nixl_posix_backend(nixl_tmp_path):
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
@@ -410,6 +468,10 @@ def test_nixl_posix_backend(nixl_tmp_path):
 
 
 @pytest.mark.no_shared_allocator
+@pytest.mark.skipif(
+    not _can_register_file_with_nixl_backend("POSIX"),
+    reason="NIXL POSIX backend cannot register file handles in this environment",
+)
 def test_nixl_posix_backend_multipath():
     """Test NIXL backend with multipath support and path sharding."""
     BASE_DIR = Path(__file__).parent

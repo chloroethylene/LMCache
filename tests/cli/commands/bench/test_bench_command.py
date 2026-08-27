@@ -24,10 +24,18 @@ from lmcache.cli.commands.bench.engine_bench.stats import (
     FinalStats,
     RequestResult,
 )
+from lmcache.cli.commands.bench.engine_bench.workloads.base import MetricSection
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _make_workload(sections: list[MetricSection] = []) -> MagicMock:  # noqa: B006
+    """A stand-in workload contributing *sections* to the report."""
+    workload = MagicMock()
+    workload.extra_metric_sections.return_value = list(sections)
+    return workload
 
 
 def _make_args(**overrides) -> argparse.Namespace:
@@ -44,10 +52,12 @@ def _make_args(**overrides) -> argparse.Namespace:
         no_csv=False,
         json=False,
         quiet=True,
+        ignore_eos=False,
         ldqa_document_length=100,
         ldqa_query_per_document=1,
         ldqa_shuffle_policy="tile",
         ldqa_num_inflight_requests=1,
+        ldqa_max_output_length=128,
         mrc_shared_prompt_length=2000,
         mrc_chat_history_length=10000,
         mrc_user_input_length=50,
@@ -333,6 +343,20 @@ class TestExportConfig:
         assert data["tokens_per_gb_kvcache"] == 50000
         assert "lmcache_url" not in data
 
+    def test_max_output_length_rejected_for_unsupported_workload(
+        self,
+        tmp_path,  # type: ignore[no-untyped-def]
+    ) -> None:
+        # Setting a non-default max output length for a workload without that
+        # parameter is rejected.
+        args = _make_args(
+            workload="random-prefill",
+            ldqa_max_output_length=512,
+            export_config=str(tmp_path / "exported.json"),
+        )
+        with pytest.raises(ValueError, match="max output length cannot be specified"):
+            run_engine_bench(BenchCommand(), args)
+
     def test_export_config_excludes_lmcache_url(
         self,
         tmp_path,  # type: ignore[no-untyped-def]
@@ -401,7 +425,7 @@ class TestBenchCommandEmitMetrics:
         old_stdout = sys.stdout
         sys.stdout = buf = io.StringIO()
         try:
-            _emit_final_metrics(cmd, config, final, args)
+            _emit_final_metrics(cmd, config, final, args, _make_workload())
         finally:
             sys.stdout = old_stdout
 
@@ -421,7 +445,7 @@ class TestBenchCommandEmitMetrics:
         old_stdout = sys.stdout
         sys.stdout = buf = io.StringIO()
         try:
-            _emit_final_metrics(cmd, config, final, args)
+            _emit_final_metrics(cmd, config, final, args, _make_workload())
         finally:
             sys.stdout = old_stdout
 
@@ -431,6 +455,32 @@ class TestBenchCommandEmitMetrics:
         assert "decode" in data["metrics"]
         assert data["metrics"]["config"]["model"] == "test-model"
         assert data["metrics"]["results"]["successful"] == 10
+
+    def test_emit_final_metrics_renders_workload_sections(self) -> None:
+        """A workload's sections reach the report alongside the common ones."""
+        cmd = BenchCommand()
+        args = _make_args(quiet=False, format="json")
+        workload = _make_workload(
+            [
+                MetricSection(
+                    key="quality",
+                    label="Answer Quality",
+                    entries=[("f1_mean", "Mean F1", 0.61)],
+                )
+            ]
+        )
+
+        old_stdout = sys.stdout
+        sys.stdout = buf = io.StringIO()
+        try:
+            _emit_final_metrics(
+                cmd, _make_config(), _make_final_stats(), args, workload
+            )
+        finally:
+            sys.stdout = old_stdout
+
+        data = json.loads(buf.getvalue())
+        assert data["metrics"]["quality"]["f1_mean"] == 0.61
 
 
 # ---------------------------------------------------------------------------
