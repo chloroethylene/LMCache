@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
 import enum
 import math
@@ -39,6 +39,7 @@ from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
+from lmcache.v1.platform.kv_wrap import planes_per_layer
 
 if TYPE_CHECKING:
     # First Party
@@ -1314,6 +1315,12 @@ class LMCacheMPWorkerAdapter:
         self._layout_hints = (
             layout_hints if layout_hints is not None else vllm_layout_hints()
         )
+        # vLLM-Ascend hands per-layer plane tuples (e.g. (K, V) pairs); the
+        # wrapper list is flattened on the wire, so the server needs the
+        # plane arity in the hints to regroup it back into layers.
+        planes = planes_per_layer(kv_caches)
+        if planes > 1 and self._layout_hints.planes_per_layer == 1:
+            self._layout_hints = replace(self._layout_hints, planes_per_layer=planes)
         self._send_register_kv_caches_request(kv_caches)
 
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
