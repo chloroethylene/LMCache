@@ -1268,6 +1268,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     ),
                 )
 
+            # Export inside the device context: interprocess event handles
+            # are sensitive to the current device at serialization time, and
+            # the handler thread's sticky device is not this context's device.
+            completion_handle = event_backend.export_event(event, cache_context.device)
+
         ed = time.perf_counter()
         if stored_count:
             logger.info(
@@ -1276,7 +1281,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 ed - st,
             )
         return (
-            event_backend.export_event(event, cache_context.device),
+            completion_handle,
             store_succeeded,
         )
 
@@ -1509,6 +1514,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         },
                     ),
                 )
+
+            # Export inside the device context, mirroring store().
+            completion_handle = event_backend.export_event(event, cache_context.device)
+
         if retrieve_succeeded:
             tokens_retrieved = num_chunks * self._ctx.chunk_size
             ed = time.perf_counter()
@@ -1519,7 +1528,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
 
         return (
-            event_backend.export_event(event, cache_context.device),
+            completion_handle,
             retrieve_succeeded,
         )
 
